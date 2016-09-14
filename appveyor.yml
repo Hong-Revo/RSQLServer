@@ -17,7 +17,6 @@ environment:
     USE_RTOOLS: true
 
 build_script:
-  - R -e "install.packages('rJava', repos='https://cran.rstudio.com', INSTALL_opts='--no-multiarch')"
   - travis-tool.sh install_deps
 
 test_script:
