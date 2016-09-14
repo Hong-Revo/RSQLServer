@@ -2,19 +2,16 @@
 <ArrayOfArrayOfArrayOfString xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
   <ArrayOfArrayOfString>
     <ArrayOfString>
-      <string>c:\users\hongooi\documents\github\rsqlserver\r\rsqlserver.r</string>
-    </ArrayOfString>
-    <ArrayOfString>
-      <string>c:\users\hongooi\documents\github\rsqlserver\.gitignore</string>
-    </ArrayOfString>
-    <ArrayOfString>
-      <string>c:\users\hongooi\documents\github\rsqlserver\.rbuildignore</string>
-    </ArrayOfString>
-    <ArrayOfString>
       <string>Team Explorer - Changes</string>
     </ArrayOfString>
     <ArrayOfString>
-      <string>C:\Users\hongooi\Documents\github\RSQLServer\appveyor.yml</string>
+      <string>C:\Users\hongooi\Documents\RSQLServer-hong\appveyor.yml</string>
+    </ArrayOfString>
+    <ArrayOfString>
+      <string>C:\Users\hongooi\Documents\RSQLServer-hong\.Rbuildignore</string>
+    </ArrayOfString>
+    <ArrayOfString>
+      <string>History - feature-appveyor-80</string>
     </ArrayOfString>
   </ArrayOfArrayOfString>
 </ArrayOfArrayOfArrayOfString>
