@@ -11,3 +11,6 @@
 
 ^secure-file$
 ^\.vs$
+^.*\.tss$
+^.*\.rxproj$
+^.*\.sln$
