@@ -18,8 +18,9 @@ environment:
     R_ARCH: x64
 
 build_script:
-  - c:\openssl-win64\bin\openssl aes-256-cbc -K %encrypted_71b396cbdae4_key% -iv %encrypted_71b396cbdae4_iv%
-    -in inst/extdata/sql.yaml.enc -out %USERPROFILE%\documents\sql.yaml -d
+  - nuget install secure-file -ExcludeVersion
+  - secure-file\tools\secure-file -decrypt inst\extdata\sql.yamlwin.enc -secret %securepwd%
+  - move inst\extdata\sql.yamlwin %USERPROFILE%\documents\sql.yaml
   - travis-tool.sh install_deps
 
 test_script:
