@@ -17,7 +17,7 @@ environment:
     USE_RTOOLS: true
     R_ARCH: x64
   test_secret:
-    secure: BSNfEghh/l4KAC3jAcwAjgTibl6UHcZ08ppSFBieQ8E=
+    secure: 58/lWptS38N8JMtoiVcrZA==
 
 build_script:
   - travis-tool.sh install_deps
