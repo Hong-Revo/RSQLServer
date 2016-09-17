@@ -21,7 +21,7 @@ environment:
 
 build_script:
   - secure-file\tools\secure-file -decrypt test.md.enc -secret %test_secret%
-  - openssl-win64\bin\openssl aes-256-cbc -K $encrypted_71b396cbdae4_key -iv $encrypted_71b396cbdae4_iv
+  - c:\openssl-win64\bin\openssl aes-256-cbc -K $encrypted_71b396cbdae4_key -iv $encrypted_71b396cbdae4_iv
     -in inst/extdata/sql.yaml.enc -out $HOME/sql.yaml -d
   - travis-tool.sh install_deps
 
