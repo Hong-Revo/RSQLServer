@@ -146,11 +146,14 @@ setMethod("dbDisconnect", "SQLServerConnection", function (conn, ...) {
   }
 })
 
+#' @param batch logical, indicates whether uploads (e.g., 'INSERT' or
+#'   'UPDATE') should be uploaded in batches, potentially much faster
+#'   than by individual rows (the default).
 #' @rdname SQLServerConnection-class
 #' @export
 
 setMethod("dbSendQuery", c("SQLServerConnection", "character"),
-  def = function (conn, statement, params = NULL, ...) {
+  def = function (conn, statement, params = NULL, ..., batch = FALSE) {
     # Notes:
     # 1. Unlike RJDBC, this method does **not** support executing stored procs
     # or precompiled statements as these do not appear to be explicitly
@@ -167,15 +170,14 @@ setMethod("dbSendQuery", c("SQLServerConnection", "character"),
     if (is_parameterised(ps) && is.null(params)) {
       return(pre_res)
     } else {
-      if (is_parameterised(ps) && !is.null(params)) {
-        dbBind(pre_res, params)
-      }
+      dbBind(pre_res, params, batch = batch)
       jr <- execute_query(pre_res@stat)
       catch_exception(jr, "Unable to retrieve result set for ", statement)
       md <- rs_metadata(jr, FALSE)
       catch_exception(md, "Unable to retrieve result set meta data for ",
         statement, " in dbSendQuery")
-      return(new("SQLServerResult", pre_res, jr = jr, md = md))
+      return(new("SQLServerResult", pre_res, jr = jr, md = md,
+        rows_fetched = RowCounter(count = 0L)))
     }
 })
 
@@ -183,23 +185,35 @@ setMethod("dbSendQuery", c("SQLServerConnection", "character"),
 #' @export
 
 setMethod("dbSendStatement", c("SQLServerConnection", "character"),
-  function(conn, statement, params = NULL, ...) {
+  function(conn, statement, params = NULL, ..., batch = FALSE) {
     assertthat::assert_that(assertthat::is.string(statement),
       is.null(params) || is.list(params))
-    if(!is.null(params)) {
-      s <- create_prepared_statement(conn, statement)
-      catch_exception(s, "Unable to create prepared statement ", statement)
-      on.exit(close_statement(s))
-      ps_bind_all(params, s)
-      res <- execute_update(s, check = TRUE)
+    if (length(params)) {
+      ps <- create_prepared_statement(conn, statement)
+      catch_exception(ps, "Unable to create statement: ", statement)
+      pre_res <- new("SQLServerPreResult", stat = ps)
+      if (batch) {
+        dbBind(pre_res, params, batch = TRUE)
+        ra <- sum(execute_batch(ps, check = TRUE))
+      } else {
+        # may benefit from 'batch=TRUE' or at least `dbWithTransaction(conn, ...)`
+        paramlen <- length(params[[1L]])
+        rets <- lapply(seq_len(paramlen), function(j) {
+          dbBind(pre_res, params = lapply(params, `[[`, j), batch = FALSE)
+          execute_update(ps, check = TRUE)
+        })
+        ra <- sum(unlist(rets))
+      }
+      on.exit(NULL) # remove dbRollBack
     } else {
+      # assume "simple", no need to compile this statement
       s <- create_statement(conn)
       catch_exception(s, "Unable to create statement ", statement)
       on.exit(close_statement(s))
-      res <- execute_update(s, statement, check = TRUE)
+      ra <- execute_update(s, statement, check = TRUE)
     }
-    res <- dbSendQuery(conn, paste("SELECT", res, "AS ROWS_AFFECTED"))
-    new("SQLServerUpdateResult", res)
+    res <- dbSendQuery(conn, paste("SELECT", ra, "AS ROWS_AFFECTED"))
+    new("SQLServerUpdateResult", res, rows_affected = ra)
 })
 
 #' @rdname SQLServerConnection-class
@@ -227,6 +241,8 @@ setMethod("dbDataType", c("SQLServerConnection", "ANY"),
     # https://msdn.microsoft.com/en-us/library/ms187752.aspx
     # https://msdn.microsoft.com/en-us/library/ms187752(v=sql.90).aspx
 
+    if (is(obj, "data.frame")) return(data_frame_data_type(dbObj, obj))
+    if (is(obj, "AsIs")) return(as_is_type(obj, dbObj))
     if (is.factor(obj)) return(char_type(obj, dbObj))
     if (inherits(obj, "POSIXct")) return("DATETIME")
     if (inherits(obj, "Date")) return(date_type(obj, dbObj))
@@ -286,7 +302,12 @@ setMethod("dbRemoveTable", "SQLServerConnection", function (conn, name, ...) {
 #' @rdname SQLServerConnection-class
 #' @export
 setMethod("dbBegin", "SQLServerConnection", function (conn, ...) {
-  rJava::.jcall(conn@jc, "V", "setAutoCommit", FALSE)
+  if (!is_autocommit(conn)) {
+    stop("Cannot begin a nested transaction.", call. = FALSE)
+  }
+  ac <- rJava::.jcall(conn@jc, "V", "setAutoCommit", FALSE, check = FALSE)
+  # http://docs.oracle.com/javase/7/docs/api/java/sql/Connection.html#setAutoCommit(boolean)
+  catch_exception(ac, "You cannot begin a transaction on a closed connection.")
   TRUE
 })
 
@@ -294,6 +315,7 @@ setMethod("dbBegin", "SQLServerConnection", function (conn, ...) {
 #' @export
 setMethod("dbCommit", "SQLServerConnection", function (conn, ...) {
   rJava::.jcall(conn@jc, "V", "commit")
+  rJava::.jcall(conn@jc, "V", "setAutoCommit", TRUE)
   TRUE
 })
 
@@ -308,56 +330,49 @@ setMethod("dbRollback", "SQLServerConnection", function (conn, ...) {
 #' @rdname SQLServerConnection-class
 #' @export
 setMethod("dbWriteTable", "SQLServerConnection",
-  function (conn, name, value, overwrite = TRUE, append = FALSE) {
+  function (conn, name, value, overwrite = TRUE, append = FALSE, batch = FALSE) {
 
     assertthat::assert_that(is.data.frame(value), ncol(value) > 0,
       !(overwrite && append))
 
-    dbBegin(conn)
-    on.exit(dbRollback(conn))
+    dbWithTransaction(conn, {
+      found <- dbExistsTable(conn, name)
+      temp <- grepl("^#", name)
 
-    found <- dbExistsTable(conn, name)
-    temp <- grepl("^#", name)
-
-    if (found && !append && !overwrite) {
-      stop("The table ", name, " exists but you are not overwriting or ",
-        "appending to this table.", call. = FALSE)
-    }
-
-    if (!found && append) {
-      stop("The table ", name, " does not exist but you are trying to ",
-        "append data to it.")
-    }
-
-    if (temp && append) {
-      stop("Appending to a temporary table is unsupported.")
-    }
-
-    name <- dbQuoteIdentifier(conn, name)
-
-    # NB: if table "name" does not exist, having "overwrite" set to TRUE does
-    # not cause problems, so no need for error handling in this case.
-    # Let server backend handle case when temp table exists but overwriting it
-
-    if ((found || temp) && overwrite) {
-      dbRemoveTable(conn, name)
-    }
-
-    if (!found || temp || overwrite) {
-      dbExecute(conn, sqlCreateTable(conn, name, value))
-    }
-
-    if (nrow(value) > 0) {
-      sql <- sqlAppendTableTemplate(conn, name, value)
-      for (j in seq_along(value[[1]])) {
-        dbExecute(conn, sql, params = as.list(value[j, ]))
+      if (found && !append && !overwrite) {
+        stop("The table ", name, " exists but you are not overwriting or ",
+          "appending to this table.", call. = FALSE)
       }
-    }
 
-    # Overwrite on.exist(dbRollback(conn)) call above as now guaranteed
-    # commit success
-    on.exit(NULL)
-    dbCommit(conn)
+      if (!found && append) {
+        stop("The table ", name, " does not exist but you are trying to ",
+          "append data to it.")
+      }
+
+      if (temp && append) {
+        stop("Appending to a temporary table is unsupported.")
+      }
+
+      name <- dbQuoteIdentifier(conn, name)
+
+      # NB: if table "name" does not exist, having "overwrite" set to TRUE does
+      # not cause problems, so no need for error handling in this case.
+      # Let server backend handle case when temp table exists but overwriting it
+
+      if ((found || temp) && overwrite) {
+        dbRemoveTable(conn, name)
+      }
+
+      if (!found || temp || overwrite) {
+        dbExecute(conn, sqlCreateTable(conn, name, value))
+      }
+
+      if (nrow(value) > 0) {
+        sql <- sqlAppendTableTemplate(conn, name, value)
+        # looping is now done within dbExecute
+        dbExecute(conn, sql, params = value, batch = batch)
+      }
+    })
     TRUE
 })
 
@@ -413,13 +428,27 @@ setMethod("fetch", c("SQLServerPreResult", "numeric"),
     md <- rs_metadata(jr, FALSE)
     catch_exception(md, "Unable to retrieve result set meta data for ",
       res@stat, " in dbSendQuery")
-    fetch(new("SQLServerResult", res, jr = jr, md = md), n)
+    rs <- new("SQLServerResult", res, jr = jr, md = md,
+      rows_fetched = RowCounter(count = 0L))
+    fetch(rs, n)
 })
 
 #' @rdname SQLServerResult-class
 #' @export
-setMethod("dbBind", "SQLServerPreResult", function(res, params, ...) {
-  rs_bind_all(params, res)
+setMethod("fetch", c("SQLServerUpdateResult", "numeric"), function(res, n, ...) {
+  data.frame()
+})
+
+#' @param batch logical, indicates whether uploads (e.g., 'INSERT' or
+#'   'UPDATE') should be uploaded in batches, potentially much faster
+#'   than by individual rows (the default). (Setting it here enabled
+#'   binding the variables in batches, the actual batched upload is
+#'   done in \code{\link{dbSendStatement}} or
+#'   \code{\link{dbExecute}}.)
+#' @rdname SQLServerResult-class
+#' @export
+setMethod("dbBind", "SQLServerPreResult", function(res, params, ..., batch = FALSE) {
+  rs_bind_all(params, res, batch = batch)
 })
 
 #' @rdname SQLServerResult-class
@@ -460,18 +489,21 @@ setMethod("fetch", c("SQLServerResult", "numeric"),
     out <- create_empty_lst(ctypes_r, cnames)
 
     ###### Fetch into cache and pull from cache into R
+    rows_fetched <- 0L
     if (n < 0L) { ## infinite pull
-      # stride - set capacity of cache
-      # block - set fetch size which gives driver hint as to # rows to be fetched
-      stride <- 32768L  ## start fairly small to support tiny queries and increase later
+      # stride - set capacity of cache. Start fairly small to support tiny
+      # queries and increase later block - set fetch size which gives driver
+      # hint as to # rows to be fetched
+      stride <- 32768L
       while ((nrec <- rJava::.jcall(rp, "I", "fetch", stride, block)) > 0L) {
         out <- fetch_rp(rp, out, ctypes)
+        rows_fetched <- rows_fetched + nrec
         if (nrec < stride) break
         stride <- 524288L # 512k
       }
     }
     if (n > 0L) {
-      nrec <- rJava::.jcall(rp, "I", "fetch", as.integer(n), block)
+      rows_fetched <- rJava::.jcall(rp, "I", "fetch", as.integer(n), block)
       out <- fetch_rp(rp, out, ctypes)
     }
     # n = 0 is taken care of by creation of `out` list variable above.
@@ -485,6 +517,9 @@ setMethod("fetch", c("SQLServerResult", "numeric"),
     # as.data.frame is expensive - create it on the fly from the list
     attr(out, "row.names") <- c(NA_integer_, length(out[[1]]))
     class(out) <- "data.frame"
+    # Update row count of ResultSet object. Using a RC object so that
+    # we can update reference value
+    res@rows_fetched$add(rows_fetched)
     out
 })
 
@@ -513,13 +548,6 @@ setMethod("dbColumnInfo", "SQLServerResult", def = function (res, ...) {
 
 #' @rdname SQLServerResult-class
 #' @export
-setMethod("dbHasCompleted", "SQLServerResult", def = function (res, ...) {
-  # Need to override RJDBC method as it always returns TRUE
-  rJava::.jcall(res@jr, "Z", "isAfterLast")
-})
-
-#' @rdname SQLServerResult-class
-#' @export
 setMethod("dbClearResult", "SQLServerResult", function (res, ...) {
   # Need to overwrite RJDBC supplied method to pass DBItest. Needs to throw
   # warning if calling this method on cleared resultset
@@ -536,6 +564,7 @@ setMethod("dbClearResult", "SQLServerResult", function (res, ...) {
   TRUE
 })
 
+
 #' @rdname SQLServerResult-class
 #' @export
 setMethod("dbGetStatement", "SQLServerResult", function(res, ...) {
@@ -545,28 +574,50 @@ setMethod("dbGetStatement", "SQLServerResult", function(res, ...) {
 #' @rdname SQLServerResult-class
 #' @export
 setMethod("dbGetRowCount", "SQLServerResult", function(res, ...) {
-  rJava::.jcall(res@jr, "I", "getRow")
+  as.numeric(res@rows_fetched$field("count"))
 })
 
 #' @rdname SQLServerResult-class
 #' @export
 setMethod("dbGetRowsAffected", "SQLServerResult", function(res, ...) {
-  rJava::.jcall(res@jr, "I", "getFetchSize")
+  # SELECT queries should return 0
+  # dbGetRowsAffected(SQLServerUpdateResult) will handle data manipulation
+  # statements
+  0
 })
 
 #' @rdname SQLServerResult-class
 #' @export
 setMethod("dbGetRowsAffected", "SQLServerUpdateResult", function(res, ...) {
-  fetch(res, -1)$ROWS_AFFECTED
+  res@rows_affected
 })
 
 #' @rdname SQLServerResult-class
 #' @export
 setMethod("dbHasCompleted", "SQLServerResult", function(res, ...) {
-  # http://docs.oracle.com/javase/7/docs/api/java/sql/ResultSet.html#isAfterLast()
-  # If res is empty (row = 0), isAfterLast() will return FALSE, but
-  # dbGetRowCount will return 0L.
-  rJava::.jcall(res@jr, "Z", "isAfterLast") || dbGetRowCount(res) == 0L
+  # JDBC isAfterLast method returns FALSE for empty ResultSets even after
+  # fetch called on ResultSet. Counting rows requires moving cursor back and
+  # forth which is inefficient and unlikely as default statement has cursor
+  # moving forward only. Need to use a different approach to working out
+  # whether rs is empty.
+  is_before_first <- rJava::.jcall(res@jr, "Z", "isBeforeFirst")
+  is_after_last <- rJava::.jcall(res@jr, "Z", "isAfterLast")
+  is_no_row <- rJava::.jcall(res@jr, "I", "getRow") == 0
+  is_after_last ||
+    # Is empty resultset?
+    (is_no_row && !is_before_first && !is_after_last)
+  # Empty
+  #   false || (true && true && true) -> true
+  # Non-empty:
+  #   Before first: false || (true && false && true) -> false
+  #   ^^Between first and last: false || (false && true && true) -> false
+  #   After last: true || ... -> true
+})
+
+#' @rdname SQLServerResult-class
+#' @export
+setMethod("dbHasCompleted", "SQLServerUpdateResult", function(res, ...) {
+  TRUE
 })
 
 # Inherited from DBI:

@@ -63,10 +63,12 @@ jtds_url <- function (server, type = "sqlserver", port = "", database = "",
 #' the \code{file} does not contain the \code{server} key
 #' @examples
 #' # See link below
+#' \dontrun{
 #' aw <- dbConnect(RSQLServer::SQLServer(), server = "mhknbn2kdz.database.windows.net",
 #'  database = 'AdventureWorks2012',
 #'  properties = list(user = "sqlfamily", password = "sqlf@@m1ly"))
 #' dbListTables(aw)
+#' }
 #' @seealso
 #' \href{https://github.com/imanuelcostigan/RSQLServer/blob/master/README.md}{RSQLServer README}
 #' \href{https://github.com/yaml/yaml}{YAML}
@@ -186,37 +188,56 @@ create_empty_lst <- function (types, names, n = 0L) {
 
 # Bindings ----------------------------------------------------------------
 
-rs_bind_all <- function(params, rs) {
-  ps_bind_all(params, rs@stat)
+rs_bind_all <- function(params, rs, batch = TRUE) {
+  ps_bind_all(params, rs@stat, batch = batch)
 }
 
-ps_bind_all <- function(params, ps) {
-  purrr::walk2(seq_along(params), params, ps_bind, ps)
-}
+ps_bind_all <- function(params, ps, batch = TRUE) {
+  nparams <- length(params)
+  if (is.null(params) || nparams == 0L) return()
+  qry_nparams <- num_parameters(ps)
+  if (qry_nparams == 0L) return()
+  paramlengths <- vapply(params, length, integer(1L))
+  if (!batch && any(paramlengths > 1L)) {
+    warning("'batch' disabled with multi-row params, only first of each param applied",
+      call. = FALSE)
+  }
 
-ps_bind <- function(i, param, ps) {
-  if (is.na(param)) {
-    ps_bind_null(i, param, ps)
-  } else if (is.integer(param)) {
-    ps_bind_int(i, param, ps)
-  } else if (is.numeric(param)) {
-    ps_bind_dbl(i, param, ps)
-  } else if (is.logical(param)) {
-    ps_bind_bln(i, param, ps)
-  } else if (inherits(param, "Date")) {
-    ps_bind_dte(i, param, ps)
-  } else if (inherits(param, "POSIXct")) {
-    ps_bind_tme(i, param, ps)
-  } else if (is.raw(param)) {
-    ps_bind_raw(i, param, ps)
-  } else {
-    ps_bind_str(i, param, ps)
+  is_na <- lapply(params, is.na)
+  is_logical <- vapply(params, is.logical, logical(1))
+  is_integer <- vapply(params, is.integer, logical(1))
+  is_numeric <- vapply(params, is.numeric, logical(1))
+  is_date <- vapply(params, inherits, logical(1), "Date")
+  is_posix <- vapply(params, inherits, logical(1), "POSIXct")
+  is_other <- !(is_logical | is_numeric | is_date | is_posix)
+
+  jtypes <- rToJdbcType(vapply(params, function(a) class(a)[1], character(1)))
+
+  for (j in seq_len(max(1L, batch * max(paramlengths)))) {
+    for (i in seq_len(min(nparams, qry_nparams))) {
+      if (is_na[[i]][[j]]) {
+        ps_bind_null(i, NULL, ps, jtype = as.integer(jtypes[i]))
+      } else if (is_integer[i]) {
+        ps_bind_int(i, params[[i]][[j]], ps)
+      } else if (is_numeric[i]) {
+        ps_bind_dbl(i, params[[i]][[j]], ps)
+      } else if (is_logical[i]) {
+        ps_bind_bln(i, params[[i]][[j]], ps)
+      } else if (is_other[i]) {
+        ps_bind_str(i, params[[i]][[j]], ps)
+      } else if (is_posix[i]) {
+        ps_bind_tme(i, params[[i]][[j]], ps)
+      } else if (is_date[i]) {
+        ps_bind_dte(i, params[[i]][[j]], ps)
+      }
+    }
+    if (batch) rJava::.jcall(ps, "V", "addBatch")
   }
 }
 
-ps_bind_null <- function(i, param, ps) {
-  rJava::.jcall(ps, "V", "setNull", i,
-    as.integer(rToJdbcType(class(param))))
+ps_bind_null <- function(i, param, ps, jtype = NULL) {
+  if (is.null(jtype)) jtype <- as.integer(rToJdbcType(class(param)))
+  rJava::.jcall(ps, "V", "setNull", i, jtype)
 }
 
 ps_bind_int <- function(i, param, ps) {
@@ -258,8 +279,12 @@ ps_bind_str <- function(i, param, ps) {
 }
 
 is_parameterised <- function(ps) {
+  num_parameters(ps) > 0
+}
+
+num_parameters <- function(ps) {
   md <- rJava::.jcall(ps, "Ljava/sql/ParameterMetaData;", "getParameterMetaData")
-  rJava::.jcall(md, "I", "getParameterCount") > 0
+  rJava::.jcall(md, "I", "getParameterCount")
 }
 
 # SQL types --------------------------------------------------------------
@@ -269,7 +294,7 @@ char_type <- function (x, con) {
   # TEXT is being deprecated. Make sure SQL types are UNICODE variants
   # (prefixed by N).
   # https://technet.microsoft.com/en-us/library/aa258271(v=sql.80).aspx
-  n <- max(nchar(as.character(x), keepNA = FALSE))
+  n <- max(max(nchar(as.character(x), keepNA = FALSE)), 1)
   if (n > 4000) {
     if (dbGetInfo(con)$db.version < 9) {
       n <- "4000"
@@ -282,7 +307,7 @@ char_type <- function (x, con) {
 
 binary_type <- function (x, con) {
   # SQL Server 2000 does not support varbinary(max) type.
-  n <- max(nchar(x, keepNA = FALSE))
+  n <- max(max(nchar(x, keepNA = FALSE)), 1)
   if (n > 8000) {
     if (dbGetInfo(con)$db.version < 9) {
       # https://technet.microsoft.com/en-us/library/aa225972(v=sql.80).aspx
@@ -302,3 +327,28 @@ date_type <- function (x, con) {
     "DATE"
   }
 }
+
+as_is_type <- function(x, con) {
+  class(x) <- class(x)[-1]
+  dbDataType(con, x)
+}
+
+data_frame_data_type <- function(x, con) {
+  vapply(x, dbDataType, FUN.VALUE = character(1), dbObj = con, USE.NAMES = TRUE)
+}
+
+# Needed to keep track of number of rows that have been fetched for
+# dbGetRowCount as JDBC ResultSet class's getRow() method returns 0 when the
+# fetch is completed.
+RowCounter <- setRefClass(
+  Class   = "RowCounter",
+  fields  = list(count = "integer"),
+  methods = list(
+    add = function(increment) {
+      count <<- count + increment
+    },
+    show = function() {
+      cat("<RowCounter>:", count, "\n")
+    }
+  )
+)

@@ -23,7 +23,13 @@ sql_select.SQLServerConnection <- function (con, select, from, where = NULL,
   if (length(limit) > 0L || length(order_by) > 0L) {
     # If ordering, then TOP should be specified, if it isn't already,
     # to ensure query works when query is part of a subquery. See #49
-    limit <- mssql_top(con, limit %||% 100, is_percent %||% FALSE)
+    # Code via Nick Kennedy:
+    # https://github.com/imanuelcostigan/RSQLServer/pull/129#commitcomment-20230748
+    if (length(limit) == 0L) {
+      limit <- mssql_top(con, 100, TRUE)
+    } else {
+      limit <- mssql_top(con, limit, is_percent %||% FALSE)
+    }
   }
 
   assertthat::assert_that(is.character(select), length(select) > 0L)
@@ -107,7 +113,7 @@ mssql_top <- function (con, n, is_percent = NULL) {
   # https://msdn.microsoft.com/en-us/library/ms189463(v=sql.90).aspx
   assertthat::assert_that(assertthat::is.number(n), n >= 0)
   n <- as.integer(n)
-  is_mssql_2000 <- dbGetInfo(con)$db.version == 8
+  is_mssql_2000 <- dbGetInfo(con)$db.version[1,1] == 8
   if (is.null(is_percent) || !isTRUE(is_percent)) {
     if (!is_mssql_2000) n <- escape(n, parens = TRUE)
     return(build_sql("TOP ", n))

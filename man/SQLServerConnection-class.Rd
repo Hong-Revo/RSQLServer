@@ -28,10 +28,10 @@
 \S4method{dbDisconnect}{SQLServerConnection}(conn, ...)
 
 \S4method{dbSendQuery}{SQLServerConnection,character}(conn, statement,
-  params = NULL, ...)
+  params = NULL, ..., batch = FALSE)
 
 \S4method{dbSendStatement}{SQLServerConnection,character}(conn, statement,
-  params = NULL, ...)
+  params = NULL, ..., batch = FALSE)
 
 dbSendUpdate(conn, statement, ...)
 
@@ -52,10 +52,15 @@ dbSendUpdate(conn, statement, ...)
 \S4method{dbRollback}{SQLServerConnection}(conn, ...)
 
 \S4method{dbWriteTable}{SQLServerConnection}(conn, name, value,
-  overwrite = TRUE, append = FALSE)
+  overwrite = TRUE, append = FALSE, batch = FALSE)
 
 \S4method{sqlCreateTable}{SQLServerConnection}(con, table, fields,
   row.names = NA, temporary = FALSE, ...)
+}
+\arguments{
+\item{batch}{logical, indicates whether uploads (e.g., 'INSERT' or
+'UPDATE') should be uploaded in batches, potentially much faster
+than by individual rows (the default).}
 }
 \description{
 SQL Server Connection class

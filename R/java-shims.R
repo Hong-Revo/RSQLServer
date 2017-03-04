@@ -59,6 +59,10 @@ execute_update <- function(statement, string = NULL, check = FALSE) {
   }
 }
 
+execute_batch <- function(statement, check = FALSE) {
+  rJava::.jcall(statement, "[I", "executeBatch", check = check)
+}
+
 rs_metadata <- function(res, check = FALSE) {
   rJava::.jcall(res, "Ljava/sql/ResultSetMetaData;", "getMetaData",
     check = check)
@@ -69,9 +73,11 @@ catch_exception <- function (object, ...) {
   # https://github.com/s-u/RJDBC/blob/1b7ccd4677ea49a93d909d476acf34330275b9ad/R/class.R#L18
   if (rJava::is.jnull(object)) {
     x <- rJava::.jgetEx(TRUE)
-    if (rJava::is.jnull(x))
-      stop(..., call. = FALSE)
-    else
+    if (!rJava::is.jnull(x))
       stop(..., ": ", rJava::.jcall(x, "S", "getMessage"), call. = FALSE)
   }
+}
+
+is_autocommit <- function(conn, check = FALSE) {
+  rJava::.jcall(conn@jc, "Z", "getAutoCommit", check = check)
 }
